@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>SHADOW STALKER: RUN</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; touch-action: none; }
+        canvas { display: block; }
+        .overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; background: black; z-index: 10; color: white; }
+        button { padding: 15px 40px; font-size: 1.5rem; background: #ff3333; border: none; color: white; cursor: pointer; border-radius: 5px; }
+        
+        /* Mobile Controls */
+        #joy-bound { position: absolute; bottom: 40px; left: 40px; width: 100px; height: 100px; background: rgba(255,255,255,0.1); border-radius: 50%; border: 1px solid white; display: none; }
+        #joy-stick { position: absolute; top: 30px; left: 30px; width: 40px; height: 40px; background: white; border-radius: 50%; opacity: 0.5; }
+        #run-btn { position: absolute; bottom: 60px; right: 40px; width: 80px; height: 80px; background: rgba(255,0,0,0.3); border: 2px solid #ff3333; border-radius: 50%; display: none; color: white; font-weight: bold; text-align: center; line-height: 80px; user-select: none; }
+        
+        /* UI */
+        #ui { position: absolute; top: 20px; left: 20px; color: white; font-weight: bold; text-shadow: 2px 2px black; display:none; pointer-events: none; z-index: 5; }
+        #warning { position: absolute; top: 20%; left: 50%; transform: translateX(-50%); color: #ff3333; font-size: 2rem; font-weight: bold; display: none; text-shadow: 0 0 10px red; pointer-events: none; z-index: 6; }
+    </style>
+</head>
+<body>
+
+<div id="menu" class="overlay">
+    <h1 style="color:#ff3333; text-shadow: 0 0 20px red;">STALKER: THE ESCAPE</h1>
+    <p>Hold <span style="color:red">RUN</span> to sprint (and zoom).</p>
+    <button onclick="startGame()">START MISSION</button>
+</div>
+
+<div id="win" class="overlay" style="display:none;"><h1>ESCAPED</h1><button onclick="location.reload()">AGAIN</button></div>
+<div id="gameover" class="overlay" style="display:none;"><h1 style="color:red;">CAUGHT</h1><button onclick="location.reload()">RETRY</button></div>
+
+<div id="warning">IT HAS SEEN YOU</div>
+<div id="ui">KEYS: <span id="keyCount">0</span>/6</div>
+<div id="run-btn">RUN</div>
+<canvas id="g"></canvas>
+<div id="joy-bound"><div id="joy-stick"></div></div>
+
+<script>
+const canvas = document.getElementById('g');
+const ctx = canvas.getContext('2d');
+const stick = document.getElementById('joy-stick');
+const bound = document.getElementById('joy-bound');
+const runBtn = document.getElementById('run-btn');
+
+let w, h, gameState = 'MENU';
+const tileSize = 80;
+
+// Logic Scales
+let currentZoom = 1;
+let targetZoom = 1;
+const zoomSpeed = 0.05;
+
+const map = [
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+    [1,2,0,0,0,0,0,0,0,0,0,0,0,5,1],
+    [1,0,1,1,1,1,1,0,1,1,1,1,1,0,1],
+    [1,0,1,0,0,0,0,2,0,0,0,0,1,0,1],
+    [1,2,1,0,1,1,1,1,1,0,1,0,1,0,1],
+    [1,0,1,0,1,0,0,0,1,0,1,0,0,2,1],
+    [1,0,1,0,1,0,1,0,1,0,1,1,1,0,1],
+    [1,0,0,0,0,0,1,0,1,0,0,0,1,0,1],
+    [1,1,1,0,1,0,0,0,1,0,1,0,1,0,1],
+    [1,0,0,0,1,1,2,1,1,0,1,0,0,0,3],
+    [1,0,1,0,0,0,0,0,0,0,1,1,1,0,1],
+    [1,4,1,1,1,1,1,1,1,1,1,2,1,2,1],
+    [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+];
+
+const player = { x: 0, y: 0, r: 15, baseSpeed: 4, speed: 4, vx: 0, vy: 0, keys: 0, isRunning: false };
+const enemy = { x: 0, y: 0, r: 20, wanderSpeed: 2.5, pursueSpeed: 4.5, speed: 2.5, state: 'WANDER', path: [], lastSeen: null };
+const camera = { x: 0, y: 0 };
+const segments = [];
+
+// Spawn logic
+map.forEach((row, y) => row.forEach((val, x) => {
+    if(val === 4) { player.x = x*tileSize+40; player.y = y*tileSize+40; map[y][x]=0; }
+    if(val === 5) { enemy.x = x*tileSize+40; enemy.y = y*tileSize+40; map[y][x]=0; }
+}));
+
+function getPath(start, end) {
+    const startNode = { x: Math.floor(start.x/tileSize), y: Math.floor(start.y/tileSize), g:0, h:0, f:0, parent: null };
+    const endNode = { x: Math.floor(end.x/tileSize), y: Math.floor(end.y/tileSize) };
+    if(endNode.y < 0 || endNode.y >= map.length || map[endNode.y][endNode.x] === 1) return [];
+    let open = [startNode], closed = [];
+    while(open.length > 0) {
+        let curr = open.reduce((p, c) => p.f < c.f ? p : c);
+        if(curr.x === endNode.x && curr.y === endNode.y) {
+            let res = [];
+            while(curr.parent) { res.push({x: curr.x*tileSize+40, y: curr.y*tileSize+40}); curr = curr.parent; }
+            return res.reverse();
+        }
+        open = open.filter(n => n !== curr); closed.push(curr);
+        for(let [dx, dy] of [[0,1],[0,-1],[1,0],[-1,0]]) {
+            let nx = curr.x+dx, ny = curr.y+dy;
+            if(ny<0 || ny>=map.length || nx<0 || nx>=map[0].length || map[ny][nx] === 1 || closed.find(n => n.x === nx && n.y === ny)) continue;
+            let g = curr.g+1, h = Math.abs(nx-endNode.x)+Math.abs(ny-endNode.y);
+            let ex = open.find(n => n.x === nx && n.y === ny);
+            if(!ex) open.push({x:nx, y:ny, g, h, f:g+h, parent:curr});
+            else if(g < ex.g) { ex.g=g; ex.f=g+ex.h; ex.parent=curr; }
+        }
+    }
+    return [];
+}
+
+function buildSegments() {
+    segments.length = 0;
+    map.forEach((row, y) => row.forEach((val, x) => {
+        if(val === 1) {
+            const l=x*tileSize, r=l+tileSize, t=y*tileSize, b=t+tileSize;
+            segments.push({a:{x:l,y:t}, b:{x:r,y:t}}, {a:{x:r,y:t}, b:{x:r,y:b}}, {a:{x:r,y:b}, b:{x:l,y:b}}, {a:{x:l,y:b}, b:{x:l,y:t}});
+        }
+    }));
+}
+
+function getIntersection(ray, seg) {
+    const x1=seg.a.x, y1=seg.a.y, x2=seg.b.x, y2=seg.b.y;
+    const x3=ray.a.x, y3=ray.a.y, x4=ray.b.x, y4=ray.b.y;
+    const den=(x1-x2)*(y3-y4)-(y1-y2)*(x3-x4);
+    if(den===0) return null;
+    const t=((x1-x3)*(y3-y4)-(y1-y3)*(x3-x4))/den;
+    const u=-((x1-x2)*(y1-y3)-(y1-y2)*(x1-x3))/den;
+    return (t>=0 && t<=1 && u>=0 && u<=1) ? {x:x1+t*(x2-x1), y:y1+t*(y2-y1), dist:u} : null;
+}
+
+function startGame() {
+    gameState = 'PLAYING';
+    document.getElementById('menu').style.display = 'none';
+    document.getElementById('joy-bound').style.display = 'block';
+    document.getElementById('run-btn').style.display = 'block';
+    document.getElementById('ui').style.display = 'block';
+    buildSegments();
+    requestAnimationFrame(loop);
+}
+
+// Mobile Handlers
+let active = false;
+bound.addEventListener('touchstart', (e) => { active = true; e.preventDefault(); });
+window.addEventListener('touchmove', e => {
+    if(!active) return;
+    const t = e.touches[0];
+    const dx = t.clientX - (bound.offsetLeft + 50), dy = t.clientY - (bound.offsetTop + 50);
+    const dist = Math.min(Math.sqrt(dx*dx+dy*dy), 40), ang = Math.atan2(dy, dx);
+    stick.style.transform = `translate(${Math.cos(ang)*dist}px, ${Math.sin(ang)*dist}px)`;
+    player.vx = (Math.cos(ang)*dist/40); player.vy = (Math.sin(ang)*dist/40);
+}, { passive: false });
+window.addEventListener('touchend', () => { active=false; stick.style.transform='translate(0,0)'; player.vx=player.vy=0; });
+
+runBtn.addEventListener('touchstart', (e) => { player.isRunning = true; targetZoom = 1.3; e.preventDefault(); });
+runBtn.addEventListener('touchend', () => { player.isRunning = false; targetZoom = 1; });
+
+function loop() {
+    if(gameState !== 'PLAYING') return;
+
+    // Smooth Zoom
+    currentZoom += (targetZoom - currentZoom) * zoomSpeed;
+
+    // Player Physics
+    player.speed = player.isRunning ? player.baseSpeed * 2 : player.baseSpeed;
+    const nx = player.x + (player.vx * player.speed), ny = player.y + (player.vy * player.speed);
+    if(map[Math.floor(player.y/tileSize)][Math.floor(nx/tileSize)] !== 1) player.x = nx;
+    if(map[Math.floor(ny/tileSize)][Math.floor(player.x/tileSize)] !== 1) player.y = ny;
+
+    // Collectibles
+    const cx = Math.floor(player.x/tileSize), cy = Math.floor(player.y/tileSize);
+    if(map[cy][cx] === 2) { map[cy][cx] = 0; player.keys++; document.getElementById('keyCount').innerText = player.keys; }
+    if(map[cy][cx] === 3 && player.keys >= 6) { gameState = 'WIN'; document.getElementById('win').style.display = 'flex'; }
+
+    // Stealth / Vision Logic
+    const dist = Math.sqrt((player.x-enemy.x)**2 + (player.y-enemy.y)**2);
+    let canSee = false;
+    // Only see player if they are within ray range AND not blocked by walls
+    if(dist < 380) {
+        const ray = {a:enemy, b:player};
+        let blocked = false;
+        for(let s of segments) { if(getIntersection(ray, s)) { blocked = true; break; } }
+        if(!blocked) canSee = true;
+    }
+
+    if(canSee) { 
+        enemy.state = 'PURSUE'; enemy.lastSeen = {x:player.x, y:player.y}; 
+        document.getElementById('warning').style.display = 'block';
+    } else if(enemy.state === 'PURSUE') { 
+        enemy.state = 'WANDER'; 
+        enemy.path = getPath(enemy, enemy.lastSeen);
+        document.getElementById('warning').style.display = 'none';
+    }
+
+    // AI Speed & Movement
+    if(enemy.state === 'PURSUE') {
+        enemy.speed = enemy.pursueSpeed;
+        const ang = Math.atan2(player.y - enemy.y, player.x - enemy.x);
+        enemy.x += Math.cos(ang) * enemy.speed; enemy.y += Math.sin(ang) * enemy.speed;
+    } else {
+        enemy.speed = enemy.wanderSpeed;
+        if(enemy.path.length === 0) {
+            let rx = Math.floor(Math.random()*map[0].length), ry = Math.floor(Math.random()*map.length);
+            if(map[ry][rx] === 0) enemy.path = getPath(enemy, {x:rx*tileSize+40, y:ry*tileSize+40});
+        }
+        if(enemy.path.length > 0) {
+            let t = enemy.path[0];
+            let ang = Math.atan2(t.y - enemy.y, t.x - enemy.x);
+            enemy.x += Math.cos(ang) * enemy.speed; enemy.y += Math.sin(ang) * enemy.speed;
+            if(Math.sqrt((t.x-enemy.x)**2 + (t.y-enemy.y)**2) < 5) enemy.path.shift();
+        }
+    }
+
+    if(dist < 30) { gameState = 'GAMEOVER'; document.getElementById('gameover').style.display = 'flex'; }
+
+    // RENDER
+    camera.x = player.x - (w/2) / currentZoom; camera.y = player.y - (h/2) / currentZoom;
+    ctx.setTransform(currentZoom, 0, 0, currentZoom, -camera.x * currentZoom, -camera.y * currentZoom);
+    ctx.fillStyle = '#050505'; ctx.fillRect(camera.x, camera.y, w/currentZoom, h/currentZoom);
+
+    const drawRays = (o, c, clr, r) => {
+        let pts = [];
+        for(let i=0; i<c; i++){
+            let ang = (i/c)*Math.PI*2, ray={a:o, b:{x:o.x+Math.cos(ang),y:o.y+Math.sin(ang)}}, cl=null;
+            for(let s of segments){ let h=getIntersection(ray,s); if(h && (!cl||h.dist<cl.dist)) cl=h; }
+            pts.push(cl ? {x:cl.x, y:cl.y} : {x:o.x+Math.cos(ang)*r, y:o.y+Math.sin(ang)*r});
+        }
+        ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); for(let p of pts) ctx.lineTo(p.x, p.y);
+        ctx.closePath();
+        let g = ctx.createRadialGradient(o.x, o.y, 0, o.x, o.y, r); g.addColorStop(0, clr); g.addColorStop(1, 'transparent');
+        ctx.fillStyle = g; ctx.fill();
+    };
+
+    drawRays(player, 80, 'rgba(255,255,255,0.3)', 400);
+    drawRays(enemy, 50, enemy.state==='PURSUE' ? 'rgba(255,0,0,0.5)' : 'rgba(200,200,0,0.1)', 350);
+
+    map.forEach((row,y) => row.forEach((t,x) => {
+        if(t===1) { ctx.fillStyle = '#1a1a1a'; ctx.fillRect(x*tileSize, y*tileSize, tileSize, tileSize); }
+        if(t===2) { ctx.fillStyle = 'magenta'; ctx.fillRect(x*tileSize+30, y*tileSize+30, 20, 20); }
+        if(t===3) { ctx.fillStyle = player.keys >= 6 ? 'blue' : '#001133'; ctx.fillRect(x*tileSize, y*tileSize, tileSize, tileSize); }
+    }));
+    
+    ctx.fillStyle = 'white'; ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = 'black'; ctx.beginPath(); ctx.arc(enemy.x, enemy.y, enemy.r, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = (enemy.state==='PURSUE') ? 'red' : 'white'; ctx.lineWidth = 3; ctx.stroke();
+
+    requestAnimationFrame(loop);
+}
+
+window.addEventListener('resize', () => { w=canvas.width=window.innerWidth; h=canvas.height=window.innerHeight; });
+window.dispatchEvent(new Event('resize'));
+</script>
+</body>
+</html>
